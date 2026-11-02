@@ -1,0 +1,29 @@
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/turnin-api ./cmd/api
+
+# Grab the static Litestream binary
+ADD https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz /tmp/litestream.tar.gz
+RUN tar -C /out -xzf /tmp/litestream.tar.gz
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 appuser
+WORKDIR /app
+COPY --from=build /out/turnin-api /app/turnin-api
+COPY --from=build /out/litestream /usr/local/bin/litestream
+COPY litestream.yml /etc/litestream.yml
+RUN mkdir -p /data/uploads/seed && chown -R appuser:appuser /data
+USER appuser
+
+ENV APP_ENV=production \
+    ADDR=:8080 \
+    DB_PATH=/data/turnin.db \
+    UPLOAD_DIR=/data/uploads
+
+EXPOSE 8080
+
+# If R2 credentials are set, restore DB on boot and replicate; otherwise run directly.
+CMD ["sh", "-c", "if [ -n \"$LITESTREAM_BUCKET\" ]; then litestream restore -if-db-not-exists -if-replica-exists /data/turnin.db && exec litestream replicate -exec '/app/turnin-api --seed'; else exec /app/turnin-api --seed; fi"]
